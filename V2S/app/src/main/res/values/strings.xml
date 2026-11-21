@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    V2S user-visible strings.
+    Role: provides a central place for application identity and future localization.
+-->
+<resources>
+    <string name="app_name">V2S</string>
+</resources>

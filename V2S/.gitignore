@@ -1,0 +1,13 @@
+# V2S source-control exclusions.
+# Role: prevents local IDE/build output and machine-specific configuration from entering Git.
+*.iml
+.gradle/
+.idea/
+local.properties
+/build/
+*/build/
+.externalNativeBuild/
+.cxx/
+.DS_Store
+*.apk
+*.aab

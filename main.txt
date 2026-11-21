@@ -1,0 +1,330 @@
+
+package com.example
+
+import android.app.Activity
+import android.app.PictureInPictureParams
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.res.Configuration
+import android.media.AudioManager
+import android.os.Build
+import android.os.Bundle
+import android.util.Log
+import android.util.Rational
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import com.example.player.EarphonePreferences
+import androidx.activity.compose.BackHandler
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.annotation.OptIn
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
+
+import com.example.data.model.VideoItem
+
+import com.example.ui.components.DeleteConfirmationDialog
+import com.example.ui.components.FloatingPipWindow
+import com.example.ui.components.PermissionGate
+import com.example.ui.components.PersistentMiniPlayer
+import com.example.ui.components.V2SAlertHost
+import com.example.ui.components.V2SSplashOpenAnimation
+import com.example.ui.components.V2SWelcomeGreetingDialog
+import com.example.ui.components.rememberV2SDeviceInfo
+import com.example.ui.components.VideoInfoBottomSheet
+import com.example.ui.components.VyloBottomBar
+
+import com.example.ui.screens.library.LibraryScreen
+import com.example.ui.screens.local.LocalScreen
+import com.example.ui.screens.player.NormalPlayerScreen
+import com.example.ui.screens.playlists.PlaylistsScreen
+import com.example.ui.screens.settings.SettingsScreen
+import com.example.ui.screens.shorts.ShortsScreen
+import com.example.ui.screens.songs.PlayitAudioPlayerView
+import com.example.ui.screens.songs.SongsScreen
+
+import com.example.ui.theme.MyApplicationTheme
+import com.example.ui.viewmodel.AppScreen
+import com.example.ui.viewmodel.MainViewModel
+
+
+class MainActivity : ComponentActivity() {
+
+    private val viewModel: MainViewModel by viewModels()
+    private val isInPipModeState = mutableStateOf(false)
+
+    // Becoming Noisy receiver: auto pause when headphones/earbuds unplugged or Bluetooth disconnected
+    private var isNoisyReceiverRegistered = false
+    private val becomingNoisyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+                val playerManager = viewModel.playerManager
+                if (EarphonePreferences.load(this@MainActivity).pauseOnUnplugEnabled) {
+                    playerManager.pause()
+                }
+            }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (!isNoisyReceiverRegistered) {
+            try {
+                registerReceiver(
+                    becomingNoisyReceiver,
+                    IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
+                )
+                isNoisyReceiverRegistered = true
+            } catch (_: Exception) {}
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (isNoisyReceiverRegistered) {
+            try {
+                unregisterReceiver(becomingNoisyReceiver)
+                isNoisyReceiverRegistered = false
+            } catch (_: Exception) {}
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        isInPipModeState.value = isInPictureInPictureMode
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        val playerState = viewModel.playerManager.playerState.value
+        val uiState = viewModel.uiState.value
+        val hasActiveVideo = playerState.currentVideo != null
+        if (hasActiveVideo && (playerState.isPlaying || uiState.isFloatingPipActive || uiState.currentScreen == AppScreen.NORMAL_PLAYER)) {
+            enterPictureInPicture()
+        }
+    }
+
+    fun enterPictureInPicture() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                val params = PictureInPictureParams.Builder()
+                    .setAspectRatio(Rational(16, 9))
+                    .build()
+                enterPictureInPictureMode(params)
+            } catch (_: Exception) {}
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        enableEdgeToEdge()
+
+        setContent {
+            val uiState by viewModel.uiState.collectAsState()
+            val isInPip by isInPipModeState
+
+            MyApplicationTheme(
+                themeMode = uiState.themeMode,
+                fontScale = uiState.fontScale,
+                uiScale = uiState.uiScale,
+                accentColor = uiState.accentColor,
+            ) {
+                if (isInPip) {
+                    SystemPipPlayerSurface(
+                        playerManager = viewModel.playerManager
+                    )
+                } else {
+                    VyloApp(
+                        viewModel = viewModel
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(UnstableApi::class)
+@Composable
+fun SystemPipPlayerSurface(
+    playerManager: com.example.player.VyloPlayerManager,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color.Black),
+        contentAlignment = Alignment.Center
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    player = playerManager.getOrCreatePlayer()
+                    useController = false
+                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                }
+            },
+            update = { view ->
+                view.player = playerManager.getOrCreatePlayer()
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+    }
+}
+
+
+@Composable
+fun VyloApp(
+    viewModel: MainViewModel
+) {
+    val uiState by viewModel.uiState.collectAsState()
+    val playerState by viewModel.playerManager.playerState.collectAsState()
+
+    val allVideos by viewModel.allVideos.collectAsState()
+    val allSongs by viewModel.allSongs.collectAsState()
+    val allPlaylists by viewModel.allPlaylists.collectAsState()
+    val folders by viewModel.folders.collectAsState()
+    val libraryVideos by viewModel.libraryVideos.collectAsState()
+    val recentlyWatched by viewModel.recentlyWatchedVideos.collectAsState()
+    val recentlyWatchedSongs by viewModel.recentlyWatchedSongs.collectAsState()
+    val favoriteVideos by viewModel.favoriteVideos.collectAsState()
+
+    /*
+     * Fast startup - no blocking splash delay.
+     */
+    var showSplashAnimation by remember {
+        mutableStateOf(false)
+    }
+
+    val snackbarHostState = remember {
+        SnackbarHostState()
+    }
+
+    var videoToDelete by remember {
+        mutableStateOf<VideoItem?>(null)
+    }
+
+    var videoForInfo by remember {
+        mutableStateOf<VideoItem?>(null)
+    }
+
+    val deleteMediaLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        viewModel.onMediaDeletePermissionResult(result.resultCode == Activity.RESULT_OK)
+    }
+
+    val pendingDelete by viewModel.pendingDeleteRequest.collectAsState()
+
+    LaunchedEffect(pendingDelete) {
+        pendingDelete?.let { pending ->
+            try {
+                deleteMediaLauncher.launch(pending.intentSenderRequest)
+            } catch (e: Exception) {
+                Log.e("MainActivity", "Failed to launch media delete permission request", e)
+                viewModel.onMediaDeletePermissionResult(false)
+            }
+        }
+    }
+
+    val context = LocalContext.current
+    val welcomePrefs = remember {
+        context.getSharedPreferences("v2s_welcome_prefs", android.content.Context.MODE_PRIVATE)
+    }
+    val deviceInfo = rememberV2SDeviceInfo()
+    var showWelcomeGreetingDialog by remember {
+        mutableStateOf(!welcomePrefs.getBoolean("dont_show_welcome_greeting", false))
+    }
+    var dontShowWelcomeAgain by remember {
+        mutableStateOf(welcomePrefs.getBoolean("dont_show_welcome_greeting", false))
+    }
+
+    /*
+     * Playback errors are reported to the user via top alert banner.
+     */
+    LaunchedEffect(playerState.error) {
+        playerState.error?.let { error ->
+            viewModel.triggerTopAlert("Playback error: $error")
+            viewModel.playerManager.clearPlaybackError()
+        }
+    }
+
+    /*
+     * Background playback policy:
+     * When the app moves to background / stopped:
+     * Stop videos and shorts immediately.
+     * Only allow audio / songs to continue playing.
+     */
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP || event == Lifecycle.Event.ON_PAUSE) {
+                val state = viewModel.playerManager.playerState.value
+                if (state.currentVideo != null && !state.isAudioOnly && !state.isVideoAudio) {
+                    viewModel.playerManager.pause()
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    /*
+     * Universal Back button: returns to previous screen / page.
+     */
+    BackHandler(
+        enabled = viewModel.canNavigateBack() || uiState.currentScreen == AppScreen.NORMAL_PLAYER || uiState.isSongPlayerExpanded

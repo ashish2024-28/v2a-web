@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    V2S launcher/header vector.
+    Role: provides a dependency-free scalable V2S play-mark used by the application header.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path android:fillColor="#FF8A00" android:pathData="M7,7 L41,7 L33,41 L15,41 Z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M21,14 L34,24 L21,34 Z" />
+</vector>

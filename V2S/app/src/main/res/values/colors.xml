@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    V2S color palette.
+    Role: documents the visual system used by the programmatic UI.
+-->
+<resources>
+    <color name="v2s_background">#071016</color>
+    <color name="v2s_surface">#111D24</color>
+    <color name="v2s_surface_secondary">#1C2930</color>
+    <color name="v2s_orange">#FF8A00</color>
+    <color name="v2s_text">#FFFFFF</color>
+    <color name="v2s_muted">#A5AFB4</color>
+</resources>

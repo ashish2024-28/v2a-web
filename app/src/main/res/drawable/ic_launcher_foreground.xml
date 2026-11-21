@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:width="86dp"
+        android:height="86dp"
+        android:drawable="@drawable/v2s_cone_logo"
+        android:gravity="center" />
+</layer-list>

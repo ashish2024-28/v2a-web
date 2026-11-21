@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Notification colors for dark system UI. -->
+    <color name="notification_primary_text">#FFFFFFFF</color>
+    <color name="notification_secondary_text">#FFB8B8B8</color>
+    <color name="notification_control_tint">#FFFFFFFF</color>
+    <color name="notification_accent">#FFFFD000</color>
+    <color name="notification_track">#FF4A4A4A</color>
+    <color name="notification_surface">#FF202124</color>
+    <color name="notification_border">#FF3C4043</color>
+    <color name="notification_control_surface">#FF303134</color>
+    <color name="notification_ripple">#33FFFFFF</color>
+
+    <color name="notification_brand_surface">#FF5A4B00</color>
+    <color name="notification_play_surface">#FFFFD000</color>
+    <color name="notification_play_ripple">#33FFFFFF</color>
+</resources>

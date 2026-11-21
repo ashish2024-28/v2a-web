@@ -1,0 +1,5 @@
+// V2S root Gradle configuration.
+// Role: declares the Android Gradle Plugin version used by the application module.
+plugins {
+    id 'com.android.application' version '9.1.1' apply false
+}

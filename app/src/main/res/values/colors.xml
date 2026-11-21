@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="purple_200">#FFBB86FC</color>
+    <color name="purple_500">#FF6200EE</color>
+    <color name="purple_700">#FF3700B3</color>
+    <color name="teal_200">#FF03DAC5</color>
+    <color name="teal_700">#FF018786</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- Notification colors for light system UI. -->
+    <color name="notification_primary_text">#FF202124</color>
+    <color name="notification_secondary_text">#FF5F6368</color>
+    <color name="notification_control_tint">#FF202124</color>
+    <color name="notification_accent">#FFB08C00</color>
+    <color name="notification_track">#FFE0E0E0</color>
+    <color name="notification_surface">#FFF8F9FA</color>
+    <color name="notification_border">#FFE2E4E7</color>
+    <color name="notification_control_surface">#FFF0F1F3</color>
+    <color name="notification_ripple">#33202124</color>
+
+    <color name="notification_brand_surface">#FFE0B200</color>
+    <color name="notification_play_surface">#FFFFD000</color>
+    <color name="notification_play_ripple">#33606000</color>
+</resources>

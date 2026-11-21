@@ -1,0 +1,20 @@
+// V2S Gradle settings.
+// Role: declares plugin repositories, dependency repositories and the single app module.
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "V2S"
+include(":app")

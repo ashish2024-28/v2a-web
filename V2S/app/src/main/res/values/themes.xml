@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    V2S theme.
+    Role: defines the base platform theme used by all activities.
+-->
+<resources>
+    <style name="Theme.V2S" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">@color/v2s_background</item>
+        <item name="android:navigationBarColor">@color/v2s_background</item>
+        <item name="android:colorAccent">@color/v2s_orange</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>

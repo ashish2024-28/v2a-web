@@ -1,0 +1,680 @@
+@file:OptIn(androidx.media3.common.util.UnstableApi::class)
+
+package com.example.player
+
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.content.SharedPreferences
+import android.media.AudioManager
+import android.media.AudioDeviceInfo
+import android.media.audiofx.LoudnessEnhancer
+import android.net.Uri
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.extractor.avi.AviExtractor
+import androidx.media3.extractor.text.DefaultSubtitleParserFactory
+import androidx.media3.extractor.amr.AmrExtractor
+import androidx.media3.extractor.mkv.MatroskaExtractor
+import androidx.media3.extractor.mp3.Mp3Extractor
+import androidx.media3.extractor.ts.AdtsExtractor
+import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
+import androidx.media3.extractor.ts.TsExtractor
+import androidx.media3.session.MediaSession
+import com.example.data.model.SongItem
+import com.example.data.model.VideoItem
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import java.io.File
+import kotlin.math.roundToInt
+
+enum class DecoderMode(val label: String, val description: String) {
+    HW("HW", "Hardware Decoder (Fast GPU)"),
+    SW("SW", "Software Decoder (Universal Formats)")
+}
+
+enum class VideoScaleMode(val label: String) {
+    FIT("Fit"),
+    ORIGINAL("100%"),
+    CROP("16:9 Crop"),
+    FILL("Stretch"),
+    ULTRAWIDE_18_9("18:9"),
+    CINEMATIC_21_9("21:9")
+}
+
+enum class EqualizerPreset(val label: String) {
+    FLAT("Flat / Normal"),
+    BASS_BOOST("Bass Boost"),
+    TREBLE_BOOST("Treble Boost"),
+    ROCK("Rock"),
+    POP("Pop"),
+    VOCAL("Vocal Boost"),
+    JAZZ("Jazz")
+}
+
+data class PlayerUiState(
+    val isPlaying: Boolean = false,
+    val currentPositionMs: Long = 0L,
+    val durationMs: Long = 0L,
+    val bufferedPositionMs: Long = 0L,
+    val isBuffering: Boolean = false,
+    val playbackSpeed: Float = 1.0f,
+    val currentVideo: VideoItem? = null,
+    val currentSong: SongItem? = null,
+    val isAudioOnly: Boolean = false,
+    val isVideoAudio: Boolean = false,
+    val notificationArtworkUri: android.net.Uri? = null,
+    val volumePercent: Int = 100,
+    val brightnessPercent: Int = 80,
+    val scaleMode: VideoScaleMode = VideoScaleMode.FIT,
+    val equalizerPreset: EqualizerPreset = EqualizerPreset.FLAT,
+    val repeatMode: Int = Player.REPEAT_MODE_OFF,
+    val isShuffle: Boolean = false,
+    val isSubtitlesEnabled: Boolean = false,
+    val isBackgroundPlayEnabled: Boolean = true,
+    val isMultiplePlaybackEnabled: Boolean = false,
+    val isLocked: Boolean = false,
+    val sleepTimerMinutesRemaining: Int? = null,
+    val error: String? = null,
+    val decoderMode: DecoderMode = DecoderMode.HW,
+    val availableVideoTracks: List<String> = emptyList(),
+    val currentVideoTrackIndex: Int = 0,
+    val isSmartMuxerDetected: Boolean = false,
+    val availableAudioTracks: List<String> = emptyList(),
+    val currentAudioTrackIndex: Int = 0,
+    val availableSubtitleTracks: List<String> = emptyList(),
+    val currentSubtitleTrackIndex: Int = -1,
+    val subtitleDelayMs: Long = 0L,
+    val subtitleFontSizeSp: Int = 18,
+    val repeatPointA: Long? = null,
+    val repeatPointB: Long? = null,
+    val isAbRepeatActive: Boolean = false
+)
+
+class VyloPlayerManager(
+    private val context: Context,
+    private val onProgressUpdate: (videoId: Long, positionMs: Long) -> Unit,
+    private val onPlaybackStarted: (videoId: Long, positionMs: Long) -> Unit = { _, _ -> },
+    private val onSongProgressUpdate: (songId: Long, positionMs: Long) -> Unit = { _, _ -> },
+    private val onSongPlaybackStarted: (songId: Long, positionMs: Long) -> Unit = { _, _ -> }
+) {
+    private val preferences: SharedPreferences =
+        context.applicationContext.getSharedPreferences("v2s_player_preferences", Context.MODE_PRIVATE)
+
+    private val savedPlaybackSpeed = preferences.getFloat("playback_speed", 1.0f).coerceIn(0.25f, 4.0f)
+    private val audioManager = context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private val savedVolumePercent = readSystemVolumePercent()
+    private val savedBrightnessPercent = preferences.getInt("brightness_percent", 80).coerceIn(0, 100)
+    private val savedScaleMode = runCatching {
+        VideoScaleMode.valueOf(preferences.getString("scale_mode", VideoScaleMode.FIT.name) ?: VideoScaleMode.FIT.name)
+    }.getOrDefault(VideoScaleMode.FIT)
+    private val savedEqualizerPreset = runCatching {
+        EqualizerPreset.valueOf(preferences.getString("equalizer_preset", EqualizerPreset.FLAT.name) ?: EqualizerPreset.FLAT.name)
+    }.getOrDefault(EqualizerPreset.FLAT)
+    private val savedRepeatMode = preferences.getInt("repeat_mode", Player.REPEAT_MODE_OFF)
+    private val savedShuffle = preferences.getBoolean("shuffle", true)
+    private val savedBackgroundPlay = preferences.getBoolean("background_play", true)
+    private val savedMultiplePlayback = preferences.getBoolean("multiple_playback", false)
+    private val savedDecoderMode = runCatching {
+        DecoderMode.valueOf(preferences.getString("decoder_mode", DecoderMode.HW.name) ?: DecoderMode.HW.name)
+    }.getOrDefault(DecoderMode.HW)
+    private val savedSubtitleFontSize = preferences.getInt("subtitle_font_size", 18).coerceIn(12, 32)
+
+    private var exoPlayer: ExoPlayer? = null
+    private var loudnessEnhancer: LoudnessEnhancer? = null
+    private var mediaSession: MediaSession? = null
+    var onPlayNextMedia: (() -> Unit)? = null
+    var onPlayPreviousMedia: (() -> Unit)? = null
+    var onMediaPlaybackCompleted: (() -> Unit)? = null
+    private val secondaryPlayers = mutableMapOf<String, ExoPlayer>()
+    private val scope = CoroutineScope(Dispatchers.Main)
+    private var progressJob: Job? = null
+    private var sleepTimerJob: Job? = null
+    private var lastPersistedPositionMs: Long = 0L
+    private var playbackStartRecorded = false
+    private var lastNotificationUpdateAtMs = 0L
+    private var lastNonZeroVolumePercent = savedVolumePercent.coerceAtLeast(1)
+    private var codecRecoveryAttempts = 0
+
+    // Global V2S earbud controller. It lives with the MediaSession rather than
+    // MainActivity, so Bluetooth/media-button controls continue to work when the
+    // player screen is not visible. It only consumes custom gestures while a
+    // headset/earbud output is actually connected.
+    private var earbudClickCount = 0
+    private var lastEarbudClickAtMs = 0L
+    private val earbudHandler = Handler(Looper.getMainLooper())
+    private val earbudClickRunnable = Runnable { dispatchCustomEarbudClicks() }
+
+
+    private val _playerState = MutableStateFlow(
+        PlayerUiState(
+            playbackSpeed = savedPlaybackSpeed,
+            volumePercent = savedVolumePercent,
+            brightnessPercent = savedBrightnessPercent,
+            scaleMode = savedScaleMode,
+            equalizerPreset = savedEqualizerPreset,
+            repeatMode = savedRepeatMode,
+            isShuffle = savedShuffle,
+            isBackgroundPlayEnabled = savedBackgroundPlay,
+            isMultiplePlaybackEnabled = savedMultiplePlayback,
+            decoderMode = savedDecoderMode,
+            subtitleFontSizeSp = savedSubtitleFontSize
+        )
+    )
+    val playerState = _playerState.asStateFlow()
+
+    init {
+        activeManager = this
+    }
+
+    fun clearPlaybackError() {
+        if (_playerState.value.error != null) {
+            _playerState.value = _playerState.value.copy(error = null)
+        }
+    }
+
+    // ── Notification helper ────────────────────────────────────────────────────
+
+    private fun postNotification(
+        isPlaying: Boolean,
+        force: Boolean = false
+    ) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (!force && now - lastNotificationUpdateAtMs < 1_000L) return
+        lastNotificationUpdateAtMs = now
+        val state = _playerState.value
+        if (!state.isBackgroundPlayEnabled) {
+            V2SMediaNotificationService.hideNotification(context)
+            return
+        }
+
+        val song = state.currentSong
+        val video = state.currentVideo
+        if (song == null && video == null) return
+
+        val title = song?.title ?: video?.title ?: "V2S"
+        val artist = song?.artist ?: "Video"
+        val artworkUri = when {
+            state.isVideoAudio -> state.notificationArtworkUri
+            song != null -> song.albumArtUri
+            video != null -> video.uri
+            else -> null
+        }
+
+        V2SMediaNotificationService.updateNotification(
+            context = context,
+            title = title,
+            artist = artist,
+            isPlaying = isPlaying,
+            isAudio = song != null || video != null,
+            artworkUri = artworkUri,
+            isVideoAudio = state.isVideoAudio || video != null,
+            positionMs = state.currentPositionMs,
+            durationMs = state.durationMs
+        )
+    }
+
+    private fun hideNotification() {
+        V2SMediaNotificationService.hideNotification(context)
+    }
+
+    // ── ExoPlayer ─────────────────────────────────────────────────────────────
+
+    @OptIn(UnstableApi::class)
+    /**
+     * Handles a Bluetooth/wired headset media-button Intent globally through
+     * MediaSession. Standard media commands are left alone unless custom V2S
+     * controls are enabled and an audio output device is connected.
+     */
+    private fun handleGlobalEarbudMediaButton(intent: Intent): Boolean {
+        val settings = EarphonePreferences.load(context)
+        if (!settings.isCustomControlsEnabled || !isHeadsetOrEarbudConnected()) return false
+
+        val event = intent.getParcelableExtra<android.view.KeyEvent>(Intent.EXTRA_KEY_EVENT)
+            ?: return false
+        if (event.action != android.view.KeyEvent.ACTION_DOWN) return true
+
+        when (event.keyCode) {
+            android.view.KeyEvent.KEYCODE_HEADSETHOOK,
+            android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+                // Repeated key-down events from a long press can be used for a
+                // configured seek action instead of being counted as many clicks.
+                if (event.repeatCount > 0) {
+                    if (settings.singleClickAction == EarphoneAction.SEEK_FORWARD_10S) {
+                        seekForward(10_000L)
+                    }
+                    return true
+                }
+                val now = android.os.SystemClock.uptimeMillis()
+                if (now - lastEarbudClickAtMs > settings.clickIntervalMs + 50L) {
+                    earbudClickCount = 0
+                }
+                lastEarbudClickAtMs = now
+                earbudClickCount++
+                earbudHandler.removeCallbacks(earbudClickRunnable)
+                earbudHandler.postDelayed(earbudClickRunnable, settings.clickIntervalMs)
+                return true
+            }
+
+            // Physical left/right information is not standardized by Bluetooth.
+            // When the headset sends explicit previous/next media commands, those
+            // are the closest reliable representation of left/right gestures.
+            android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                executeGlobalEarbudAction(settings.doubleClickLeftAction)
+                return true
+            }
+            android.view.KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                executeGlobalEarbudAction(settings.doubleClickRightAction)
+                return true
+            }
+            android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                executeGlobalEarbudAction(EarphoneAction.SEEK_FORWARD_10S)
+                return true
+            }
+            android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                executeGlobalEarbudAction(EarphoneAction.SEEK_BACKWARD_10S)
+                return true
+            }
+            android.view.KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                play()
+                return true
+            }
+            android.view.KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                pause()
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun dispatchCustomEarbudClicks() {
+        val settings = EarphonePreferences.load(context)
+        if (!settings.isCustomControlsEnabled || !isHeadsetOrEarbudConnected()) {
+            earbudClickCount = 0
+            return
+        }
+        val action = when (earbudClickCount) {
+            1 -> settings.singleClickAction
+            2 -> settings.doubleClickAction
+            3 -> settings.tripleClickAction
+            else -> EarphoneAction.NONE
+        }
+        earbudClickCount = 0
+        executeGlobalEarbudAction(action)
+    }
+
+    private fun executeGlobalEarbudAction(action: EarphoneAction) {
+        when (action) {
+            EarphoneAction.PLAY_PAUSE -> togglePlayPause()
+            EarphoneAction.NEXT_TRACK -> onPlayNextMedia?.invoke() ?: nextTrack()
+            EarphoneAction.PREVIOUS_TRACK -> onPlayPreviousMedia?.invoke() ?: previousTrack()
+            EarphoneAction.SEEK_FORWARD_10S -> seekForward(10_000L)
+            EarphoneAction.SEEK_BACKWARD_10S -> seekBackward(10_000L)
+            EarphoneAction.INCREASE_VOLUME -> increaseVolume()
+            EarphoneAction.DECREASE_VOLUME -> decreaseVolume()
+            EarphoneAction.MUTE_UNMUTE -> toggleMute()
+            EarphoneAction.TOGGLE_SPEED -> {
+                val speeds = listOf(1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
+                val current = _playerState.value.playbackSpeed
+                val index = speeds.indexOfFirst { kotlin.math.abs(it - current) < 0.05f }
+                setPlaybackSpeed(speeds[(if (index < 0) 0 else index + 1) % speeds.size])
+            }
+            EarphoneAction.NONE -> Unit
+        }
+    }
+
+    private fun toggleMute() {
+        val current = _playerState.value.volumePercent
+        if (current > 0) {
+            preferences.edit().putInt("earphone_previous_volume", current).apply()
+            setSystemVolumePercent(0)
+        } else {
+            val previous = preferences.getInt("earphone_previous_volume", 100).coerceAtLeast(1)
+            setSystemVolumePercent(previous)
+        }
+    }
+
+    private fun isHeadsetOrEarbudConnected(): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                audioManager.isBluetoothA2dpOn || audioManager.isBluetoothScoOn || audioManager.isWiredHeadsetOn
+            } else {
+                audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { device ->
+                    when (device.type) {
+                        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                        AudioDeviceInfo.TYPE_BLE_HEADSET,
+                        AudioDeviceInfo.TYPE_HEARING_AID,
+                        AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+                        AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                        AudioDeviceInfo.TYPE_USB_HEADSET -> true
+                        else -> false
+                    }
+                }
+            }
+        } catch (_: SecurityException) {
+            // If Bluetooth device information is unavailable, fail closed so
+            // custom controls cannot hijack ordinary phone media controls.
+            false
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun getOrCreatePlayer(): ExoPlayer {
+        if (exoPlayer != null) return exoPlayer!!
+
+        val userAgent = androidx.media3.common.util.Util.getUserAgent(context, "V2S_Media_Player")
+        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+            .setUserAgent(userAgent)
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(20000)
+            .setReadTimeoutMs(20000)
+
+        val dataSourceFactory = DefaultDataSource.Factory(context, httpDataSourceFactory)
+        // Media3's default extractor set covers MP4/M4V, Matroska/WebM, MP3/AAC,
+        // MPEG-TS/PS, FLV, WAV, AMR and several other containers. AVI is added
+        // explicitly because it is not guaranteed to be part of every default
+        // extractor configuration. This keeps container detection reliable for
+        // MediaStore content:// URIs as well as normal file paths.
+        val baseExtractorsFactory = DefaultExtractorsFactory()
+            .setConstantBitrateSeekingEnabled(true)
+            .setConstantBitrateSeekingAlwaysEnabled(true)
+            .setMatroskaExtractorFlags(MatroskaExtractor.FLAG_EMIT_RAW_SUBTITLE_DATA)
+            .setMp3ExtractorFlags(Mp3Extractor.FLAG_ENABLE_CONSTANT_BITRATE_SEEKING)
+            .setAdtsExtractorFlags(AdtsExtractor.FLAG_ENABLE_CONSTANT_BITRATE_SEEKING)
+            .setAmrExtractorFlags(AmrExtractor.FLAG_ENABLE_CONSTANT_BITRATE_SEEKING)
+            .setTsExtractorFlags(DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS)
+
+        val extractorsFactory = androidx.media3.extractor.ExtractorsFactory {
+            val defaults = baseExtractorsFactory.createExtractors().toMutableList()
+            if (defaults.none { it is AviExtractor }) {
+                defaults.add(
+                    AviExtractor(
+                        AviExtractor.FLAG_EMIT_RAW_SUBTITLE_DATA,
+                        DefaultSubtitleParserFactory()
+                    )
+                )
+            }
+            defaults.toTypedArray()
+        }
+        val mediaSourceFactory = DefaultMediaSourceFactory(context, extractorsFactory)
+            .setDataSourceFactory(dataSourceFactory)
+        val renderersFactory = DefaultRenderersFactory(context)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+            .setEnableDecoderFallback(true)
+            .setMediaCodecSelector { mimeType, requiresSecure, requiresTunneling ->
+                val defaultDecoders = androidx.media3.exoplayer.mediacodec.MediaCodecSelector.DEFAULT.getDecoderInfos(mimeType, requiresSecure, requiresTunneling)
+                if (_playerState.value.decoderMode == DecoderMode.SW) {
+                    val swDecoders = defaultDecoders.filter {
+                        !it.hardwareAccelerated ||
+                                it.name.startsWith("c2.android", ignoreCase = true) ||
+                                it.name.startsWith("OMX.google", ignoreCase = true)
+                    }
+                    if (swDecoders.isNotEmpty()) swDecoders else defaultDecoders
+                } else {
+                    defaultDecoders
+                }
+            }
+
+        val audioAttributes = androidx.media3.common.AudioAttributes.Builder()
+            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+            .setUsage(C.USAGE_MEDIA)
+            .build()
+
+        val player = ExoPlayer.Builder(context, renderersFactory)
+            .setMediaSourceFactory(mediaSourceFactory)
+            // Media3 owns audio-focus lifecycle for the single player/session.
+            // Do not also request focus manually: two independent focus requests
+            // can deliver AUDIOFOCUS_LOSS to this app and immediately pause playback.
+            .setAudioAttributes(audioAttributes, true)
+            .build()
+            .apply {
+                repeatMode = if (_playerState.value.repeatMode == Player.REPEAT_MODE_ONE) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+                shuffleModeEnabled = _playerState.value.isShuffle
+                volume = 1f
+                playbackParameters = PlaybackParameters(_playerState.value.playbackSpeed)
+                addListener(object : Player.Listener {
+                    override fun onTracksChanged(tracks: Tracks) {
+                        updateTracksInfo(tracks)
+                    }
+
+                    override fun onAudioSessionIdChanged(audioSessionId: Int) {
+                        setupAudioEffects(audioSessionId)
+                    }
+
+                    override fun onIsPlayingChanged(isPlaying: Boolean) {
+                        Log.d(
+                            "V2SPlayer",
+                            "isPlaying=$isPlaying state=$playbackState media=${currentMediaItem?.mediaId}"
+                        )
+                        _playerState.value = _playerState.value.copy(isPlaying = isPlaying)
+                        if (isPlaying && !playbackStartRecorded) {
+                            _playerState.value.currentVideo?.let { video ->
+                                onPlaybackStarted(video.id, currentPosition)
+                                playbackStartRecorded = true
+                            }
+                            _playerState.value.currentSong?.let { song ->
+                                onSongPlaybackStarted(song.id, currentPosition)
+                                playbackStartRecorded = true
+                            }
+                        }
+                        // ▼ V2S: update persistent notification like VLC / PlayIt
+                        postNotification(isPlaying, force = true)
+                        if (isPlaying) {
+                            startProgressTracking()
+                        } else {
+                            stopProgressTracking()
+                            _playerState.value.currentVideo?.let { video ->
+                                onProgressUpdate(video.id, currentPosition)
+                            }
+                            _playerState.value.currentSong?.let { song ->
+                                onSongProgressUpdate(song.id, currentPosition)
+                            }
+                        }
+                    }
+
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        val isBuffering = playbackState == Player.STATE_BUFFERING
+                        _playerState.value = _playerState.value.copy(
+                            isBuffering = isBuffering,
+                            durationMs = if (duration > 0) duration else _playerState.value.durationMs
+                        )
+
+                        if (playbackState == Player.STATE_READY) {
+                            codecRecoveryAttempts = 0
+                            _playerState.value = _playerState.value.copy(
+                                durationMs = duration,
+                                bufferedPositionMs = bufferedPosition,
+                                error = null
+                            )
+                        }
+
+                        if (playbackState == Player.STATE_ENDED) {
+                            scope.launch(Dispatchers.Main) {
+                                handleMediaEnded()
+                            }
+                        }
+                    }
+
+                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                        val message = error.localizedMessage?.takeIf { it.isNotBlank() }
+                            ?: "Cannot load this media"
+                        Log.e("V2SPlayer", "Playback failed: $message", error)
+
+                        val isDecoderOrResourceError = error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
+                                error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FAILED ||
+                                error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED ||
+                                message.contains("MediaCodec", ignoreCase = true) ||
+                                message.contains("resource", ignoreCase = true) ||
+                                message.contains("decoder", ignoreCase = true) ||
+                                message.contains("Released", ignoreCase = true)
+
+                        if (isDecoderOrResourceError && codecRecoveryAttempts < 2) {
+                            codecRecoveryAttempts++
+                            Log.w("V2SPlayer", "Decoder or resource reclamation issue ($message). Auto-recovering player (attempt $codecRecoveryAttempts/2)...")
+                            scope.launch(Dispatchers.Main) {
+                                delay(250)
+                                if (_playerState.value.decoderMode == DecoderMode.HW) {
+                                    setDecoderMode(DecoderMode.SW)
+                                } else {
+                                    val currentMedia = exoPlayer?.currentMediaItem
+                                    val pos = exoPlayer?.currentPosition ?: _playerState.value.currentPositionMs
+                                    val wasPlaying = exoPlayer?.playWhenReady ?: true
+                                    try {
+                                        exoPlayer?.stop()
+                                        exoPlayer?.release()
+                                    } catch (_: Exception) {}
+                                    exoPlayer = null
+                                    if (currentMedia != null) {
+                                        val newPlayer = getOrCreatePlayer()
+                                        newPlayer.setMediaItem(currentMedia)
+                                        newPlayer.seekTo(pos)
+                                        newPlayer.prepare()
+                                        if (wasPlaying) newPlayer.play()
+                                    }
+                                }
+                            }
+                            return
+                        }
+
+                        _playerState.value = _playerState.value.copy(
+                            error = message,
+                            isBuffering = false,
+                            isPlaying = false
+                        )
+                        stopProgressTracking()
+                    }
+                })
+            }
+        exoPlayer = player
+        if (mediaSession == null) {
+            try {
+                val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+                    ?: Intent(Intent.ACTION_MAIN).apply {
+                        setPackage(context.packageName)
+                        addCategory(Intent.CATEGORY_LAUNCHER)
+                    }
+                launchIntent.flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                val sessionActivityPendingIntent = PendingIntent.getActivity(
+                    context,
+                    0,
+                    launchIntent,
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+                mediaSession = MediaSession.Builder(context, player)
+                    .setSessionActivity(sessionActivityPendingIntent)
+                    .setCallback(object : MediaSession.Callback {
+                        override fun onMediaButtonEvent(
+                            session: MediaSession,
+                            controller: MediaSession.ControllerInfo,
+                            intent: Intent
+                        ): Boolean {
+                            return if (handleGlobalEarbudMediaButton(intent)) {
+                                true
+                            } else {
+                                super.onMediaButtonEvent(session, controller, intent)
+                            }
+                        }
+
+                        override fun onPlayerCommandRequest(
+                            session: MediaSession,
+                            controller: MediaSession.ControllerInfo,
+                            playerCommand: Int
+                        ): Int {
+                            if (playerCommand == Player.COMMAND_SEEK_TO_NEXT || playerCommand == Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM) {
+                                onPlayNextMedia?.invoke()
+                            } else if (playerCommand == Player.COMMAND_SEEK_TO_PREVIOUS || playerCommand == Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM) {
+                                onPlayPreviousMedia?.invoke()
+                            }
+                            return super.onPlayerCommandRequest(session, controller, playerCommand)
+                        }
+                    })
+                    .build()
+            } catch (e: Exception) {
+                Log.e("V2SPlayer", "Error initializing MediaSession: ${e.message}", e)
+            }
+        }
+        return player
+    }
+
+    /**
+     * Persist the exact position of the media that is currently loaded before
+     * another media item replaces it. This is especially important for Shorts,
+     * where a vertical swipe can happen before the normal 5-second persistence
+     * interval fires.
+     */
+    private fun persistCurrentPosition() {
+        val state = _playerState.value
+        val position = (exoPlayer?.currentPosition ?: state.currentPositionMs)
+            .coerceAtLeast(0L)
+
+        state.currentVideo?.let { video ->
+            onProgressUpdate(video.id, position)
+        }
+
+        state.currentSong?.let { song ->
+            onSongProgressUpdate(song.id, position)
+        }
+
+        lastPersistedPositionMs = position
+        _playerState.value = state.copy(currentPositionMs = position)
+    }
+
+    private fun readSystemVolumePercent(): Int {
+        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+        val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        return ((current.toFloat() / max.toFloat()) * 100f).roundToInt().coerceIn(0, 100)
+    }
+
+    private fun mediaKey(state: PlayerUiState): String? = when {
+        state.currentVideo != null -> "video:${state.currentVideo.id}"
+        state.currentSong != null -> "song:${state.currentSong.id}"
+        else -> null
+    }
+
+    private fun prepareForNewMedia(stateBeforeSwitch: PlayerUiState) {
+        val currentPlayer = exoPlayer ?: return
+        val key = mediaKey(stateBeforeSwitch)
+        if (_playerState.value.isMultiplePlaybackEnabled && key != null && currentPlayer.isPlaying) {
+            if (secondaryPlayers.size >= 1) {
+                releaseSecondaryPlayers()
+            }
+            secondaryPlayers[key]?.release()
+            secondaryPlayers[key] = currentPlayer
+            currentPlayer.addListener(object : Player.Listener {
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (playbackState == Player.STATE_ENDED) {
+                        secondaryPlayers.remove(key)?.release()
+                    }
+                }
+            })
+            exoPlayer = null
+            return
+        }
+        releaseSecondaryPlayers()
+    }
+

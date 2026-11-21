@@ -1,0 +1,6 @@
+{
+  "name": "V2S",
+  "description": "V2S (Videos, Shorts & Songs) - High-performance all-format media player for Android with 4K/UHD playback, YouTube-style Shorts reel player, audio equalizer, and network streaming.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
